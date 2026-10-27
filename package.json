@@ -1,6 +1,6 @@
 {
   "name": "115rename-codex-version",
-  "version": "2.4.9",
+  "version": "2.4.10",
   "private": true,
   "description": "Tampermonkey userscript for previewing, cleaning and renaming files in the legacy 115 UI",
   "license": "MIT",

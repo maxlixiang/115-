@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         115Rename_CodexVersion_V2.4.9
+// @name         115Rename_CodexVersion_V2.4.10
 // @namespace    http://tampermonkey.net/
-// @version      2.4.9
+// @version      2.4.10
 // @description  预览后先清理小于200MiB的所有文件与作品子目录，必要时救援内层视频，核对完成后按原规则联网改名
 // @match        https://115.com/*
 // @match        https://*.115.com/*
@@ -18,7 +18,7 @@
 
 (function () {
     'use strict';
-    const VERSION='2.4.9';
+    const VERSION='2.4.10';
     const VIDEO=['mp4','mkv','avi','wmv','iso','rmvb','mov','ts','flv','m2ts','vob','mpg','mpeg','rm','m4v'];
     const utf8=new TextEncoder();
     const domain=/(?:[a-z0-9]+\.)+(?:com|net|org|xyz|me|cc|co|la|tv|vip|club|fun|top|info|to|cn|app)\b/gi;
@@ -482,10 +482,50 @@
         for(const m of moves){const list=cache.get(String(m.to.id));if(!list)throw Error('救援目标目录快照缺失');list.push({...kept.get('f'+m.file.id)});}
         return {limit:CLEAN_LIMIT,moves,deleteFiles,deleteDirs,items:future,cache,originalItems:items.map(x=>({...x})),originalSnapshots:new Map([...snapshots].map(([id,xs])=>[String(id),xs.map(x=>({...x}))]))};
     }
+    const READ_CONCURRENCY=3;
+    async function parallelRead(values,visit,check=()=>{}) {
+        const items=[...values];let cursor=0,failure=null;
+        async function worker() {
+            while(!failure) {
+                try {
+                    check();const i=cursor++;if(i>=items.length)return;
+                    await visit(items[i],i);
+                }catch(error){if(!failure)failure=error instanceof Error?error:Error(String(error));}
+            }
+        }
+        // 失败后不再启动新请求，等待已发出的读取结束，再把错误交给调用方。
+        await Promise.all(Array.from({length:Math.min(READ_CONCURRENCY,items.length)},worker));
+        if(failure)throw failure;
+    }
+    function cleanupVerificationScope(plan) {
+        const snapshots=new Map([...plan.originalSnapshots].map(([id,xs])=>[String(id),xs]));
+        const folders=new Map();
+        for(const xs of snapshots.values())for(const item of xs)if(item.folder)folders.set(String(item.id),item);
+        for(const item of plan.originalItems)if(item.folder)folders.set(String(item.id),item);
+        const affected=new Set();
+        function add(cid) {
+            cid=String(cid);const seen=new Set();
+            while(true) {
+                if(seen.has(cid))throw Error('清理核对目录层级循环');seen.add(cid);
+                if(!snapshots.has(cid))throw Error('清理核对快照缺失（cid='+cid+'）');
+                affected.add(cid);
+                const parent=folders.get(cid)?.parentId;
+                if(parent===undefined||parent===null||!snapshots.has(String(parent)))break;
+                cid=String(parent);
+            }
+        }
+        for(const move of plan.moves){add(move.file.parentId);add(move.to.id);}
+        for(const file of plan.deleteFiles)add(file.parentId);
+        for(const dir of plan.deleteDirs){add(dir.parentId);add(dir.id);for(const item of dir.contents)if(item.folder)add(item.id);}
+        // 只缩小清理阶段的范围；后续改名仍会单独核对所有待改名目录。
+        return affected;
+    }
     async function executeCleanup(plan,{list,post,log,check=()=>{},pause=ms=>new Promise(r=>setTimeout(r,ms)),progress=()=>{}}) {
         const expected=new Map([...plan.originalSnapshots].map(([id,xs])=>[id,xs.map(x=>({...x}))]));
+        const scope=cleanupVerificationScope(plan);
         async function verify(cid){check();const got=await list(String(cid));if(!expected.has(String(cid))||cleanupFingerprint(got)!==cleanupFingerprint(expected.get(String(cid))))throw Error('清理前目录内容或大小已变化，请重扫（cid='+cid+'）');}
-        for(const cid of expected.keys()){progress('清理前核对目录 '+cid);await verify(cid);}
+        let verified=0;
+        await parallelRead(scope,async cid=>{await verify(cid);progress('清理前核对相关目录 '+(++verified)+'/'+scope.size);},check);
         async function confirm(cids){
             for(let attempt=0;attempt<3;attempt++){
                 let ok=true;
@@ -497,7 +537,7 @@
         }
         for(const move of plan.moves){
             check();const from=String(move.file.parentId),to=String(move.to.id);progress('救援内层视频：'+move.file.name);
-            await verify(from);await verify(to);log({action:'move_requested',...move});
+            await parallelRead(new Set([from,to]),verify,check);log({action:'move_requested',...move});
             await post('/files/move',{fid:move.file.id,pid:to});
             expected.set(from,expected.get(from).filter(x=>x.folder||String(x.id)!==String(move.file.id)));
             expected.get(to).push({...move.file,parentId:to});await confirm([from,to]);log({action:'move_confirmed',...move});
@@ -508,12 +548,13 @@
             expected.set(cid,expected.get(cid).filter(x=>x.folder||String(x.id)!==String(file.id)));await confirm([cid]);log({action:'delete_small_confirmed',file});
         }
         for(const dir of plan.deleteDirs){
-            check();const cid=String(dir.parentId);progress('删除作品子目录（含剩余内容）：'+dir.name);await verify(cid);
-            for(const x of [dir,...dir.contents.filter(x=>x.folder)])await verify(x.id);
+            check();const cid=String(dir.parentId);progress('删除作品子目录（含剩余内容）：'+dir.name);
+            await parallelRead(new Set([cid,String(dir.id),...dir.contents.filter(x=>x.folder).map(x=>String(x.id))]),verify,check);
             log({action:'delete_subfolder_requested',directory:dir});await post('/rb/delete',{fid:dir.id,pid:cid});
             expected.set(cid,expected.get(cid).filter(x=>!x.folder||String(x.id)!==String(dir.id)));await confirm([cid]);log({action:'delete_subfolder_confirmed',directory:dir});
         }
-        for(const [cid,wanted] of plan.cache){check();const got=await list(cid);if(cleanupFingerprint(got)!==cleanupFingerprint(wanted))throw Error('清理后状态与改名预览不一致，停止并重新扫描（cid='+cid+'）');}
+        const remaining=[...scope].filter(cid=>plan.cache.has(cid));
+        await parallelRead(remaining,async cid=>{check();const got=await list(cid);if(cleanupFingerprint(got)!==cleanupFingerprint(plan.cache.get(cid)))throw Error('清理后状态与改名预览不一致，停止并重新扫描（cid='+cid+'）');},check);
     }
 
     function taskProgressText(progress) {
@@ -529,7 +570,7 @@
         if(doc.querySelector('iframe[rel="wangpan"]')||doc.querySelector('li[file_type][cate_id],li[file_type][file_id]'))return 'legacy';
         return 'unknown';
     }
-    const core={PRIMARY_SOURCE,detect115Page,taskProgressText,buildIssueReport,independentTitleVideos,CLEAN_LIMIT,cleanupFingerprint,buildCleanup,executeCleanup,discardedLabel,cleanNotes,repairSourcePrefix,readVideoStructure,VERSION,splitVideo,canonical,findCode,sameCode,topComma,normalizeTag,desc,mergeNotes,extractInfo,videoInfo,validDate,cleanTitle,checkedMeta,parseDocument,buildFolderName,planFolder,settle,matchesSavedName,rewriteFolderLabels,collectIssues};
+    const core={PRIMARY_SOURCE,detect115Page,taskProgressText,buildIssueReport,independentTitleVideos,CLEAN_LIMIT,READ_CONCURRENCY,parallelRead,cleanupVerificationScope,cleanupFingerprint,buildCleanup,executeCleanup,discardedLabel,cleanNotes,repairSourcePrefix,readVideoStructure,VERSION,splitVideo,canonical,findCode,sameCode,topComma,normalizeTag,desc,mergeNotes,extractInfo,videoInfo,validDate,cleanTitle,checkedMeta,parseDocument,buildFolderName,planFolder,settle,matchesSavedName,rewriteFolderLabels,collectIssues};
     if(typeof module!=='undefined'&&module.exports){module.exports=core;return;}
     if(window.top!==window.self)return;
 
@@ -815,11 +856,12 @@
                 else {const p=folderRows.get(String(r.dependsOn));if(p?.parentId!==null&&p?.parentId!==undefined)cids.add(String(p.parentId));}
             }
             let count=0;
-            for(const cid of cids) {
-                checkStop();status('执行前核对目录 '+(++count)+'/'+cids.size);
+            await parallelRead(cids,async cid=>{
+                checkStop();
                 const current=await listing(cid,true);
                 if(!initial.has(cid)||fingerprint(current)!==initial.get(cid))throw Error('目录内容已变化（cid='+cid+'），未开始改名，请重新扫描');
-            }
+                status('改名前核对目录 '+(++count)+'/'+cids.size);
+            },checkStop);
             // 同一目录的内容不变且文件夹本身无需改名时，视为备注已在原名保存。
             for(const r of state.rows.filter(r=>r.folder&&!r.skip&&r.oldName===r.newName))success.add(String(r.id));
             const ordered=[...todo.filter(r=>!r.folder&&r.independentVideo),...todo.filter(r=>r.folder).sort((a,b)=>a.path.split('/').length-b.path.split('/').length),...todo.filter(r=>!r.folder&&!r.independentVideo)];
