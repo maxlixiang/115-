@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         115Rename_CodexVersion_V2.4.8
+// @name         115Rename_CodexVersion_V2.4.9
 // @namespace    http://tampermonkey.net/
-// @version      2.4.8
+// @version      2.4.9
 // @description  预览后先清理小于200MiB的所有文件与作品子目录，必要时救援内层视频，核对完成后按原规则联网改名
 // @match        https://115.com/*
 // @match        https://*.115.com/*
@@ -18,7 +18,7 @@
 
 (function () {
     'use strict';
-    const VERSION='2.4.8';
+    const VERSION='2.4.9';
     const VIDEO=['mp4','mkv','avi','wmv','iso','rmvb','mov','ts','flv','m2ts','vob','mpg','mpeg','rm','m4v'];
     const utf8=new TextEncoder();
     const domain=/(?:[a-z0-9]+\.)+(?:com|net|org|xyz|me|cc|co|la|tv|vip|club|fun|top|info|to|cn|app)\b/gi;
@@ -65,7 +65,7 @@
     function normalizeTag(text) {
         const t=text.trim();
         if(discardedLabel(t))return '';
-        if(/^(?:U|UC|UNCENSORED|UNCEN)$/i.test(t))return '无码';
+        if(/^(?:U|UC|UNCENSORED|UNCEN|UNC)$/i.test(t))return '无码';
         if(/^(?:C|CH)$/i.test(t))return '中文字幕';
         const map={'中文':'中文字幕','中字':'中文字幕','中文字幕':'中文字幕','中文配音':'中文配音','高清':'高清','超清':'超清','全高清':'全高清','无码':'无码','無碼':'无码','有码':'有码','有碼':'有码','无修正':'无修正','無修正':'无修正'};
         if(map[t])return map[t];
@@ -106,6 +106,18 @@
         // 仅修复已确认的来源域名+无码描述+残缺右括号，不放宽人工备注的括号检查。
         if(source&&/^(?:破解(?:无码|無碼)|无码|無碼)】$/.test(leftover))return {stem:'【无码】'+stem.slice(hit.start),repaired:true};
         return {stem,repaired:false};
+    }
+    function promoteUNCNotes(notes,tags) {
+        // UNC是版本描述；仅提取独立标记，保留时间和其他人工备注。
+        return notes.map(raw=>{
+            let promoted=false;
+            const kept=raw.split(/[，,]/).map(part=>part.replace(/(^|[\s；;、])UNC(?=$|[\s；;、])/gi,(_,before)=>{
+                promoted=true;return before;
+            }).replace(/^[\s；;、]+|[\s；;、]+$/g,'')).filter(Boolean);
+            if(!promoted)return raw;
+            tags.push('无码');
+            return kept.join('，');
+        }).filter(Boolean);
     }
     function promote2KNotes(notes,tags) {
         const compound=text=>/^2K(?:分辨率)?[-_\s]+(?:C|CH)$/i.test(text.trim());
@@ -155,8 +167,8 @@
         // 方括号备注在原名里先于末尾逗号备注，保留这个顺序。
         notes.unshift(...bracketNotes);
         tags.push(...desc(body));
-        for(const m of body.matchAll(/(?:^|[-_.\s])(UC|CH|AI|C|U|uncensored|uncen|HD|SD|FHD|UHD)(?=$|[^a-z])/gi)) {
-            const before=body.slice(0,m.index).replace(/中文字幕|中文配音|全高清|高清|超清|无码|無碼|有码|有碼|[2468]K(?:分辨率)?|(?:720|1080|2160)[PI]/gi,'').replace(/\b(?:UC|CH|AI|C|U|uncensored|uncen|HD|SD|FHD|UHD)\b/gi,'').replace(/[-_.\s]/g,'');
+        for(const m of body.matchAll(/(?:^|[-_.\s])(UC|CH|AI|C|U|uncensored|uncen|unc|HD|SD|FHD|UHD)(?=$|[^a-z])/gi)) {
+            const before=body.slice(0,m.index).replace(/中文字幕|中文配音|全高清|高清|超清|无码|無碼|有码|有碼|[2468]K(?:分辨率)?|(?:720|1080|2160)[PI]/gi,'').replace(/\b(?:UC|CH|AI|C|U|uncensored|uncen|unc|HD|SD|FHD|UHD)\b/gi,'').replace(/[-_.\s]/g,'');
             // 短码只从番号附近的描述前缀识别，避免把作品标题中的LOVE U等词误当版本。
             if(!before)tags.push(normalizeTag(m[1]));
         }
@@ -178,7 +190,7 @@
                 notes.unshift(text);
             }
         }
-        return {notes:cleanNotes(promote2KNotes(notes,tags)),tags:uniq(tags).filter(t=>!discardedLabel(t)),body,hit};
+        return {notes:cleanNotes(promote2KNotes(promoteUNCNotes(notes,tags),tags)),tags:uniq(tags).filter(t=>!discardedLabel(t)),body,hit};
     }
     function readVideoStructure(tail) {
         const versions=[],parts=[],quality=[];
@@ -186,7 +198,7 @@
         let rest=(comma<0?tail:tail.slice(0,comma)).replace(domain,'');
         rest=rest.replace(/【([^】]*)】|\[([^\]]*)\]/g,(_,a,b)=>{
             const token=(a??b).trim();
-            if(/^(?:UNCENSORED|UNCEN|UC|CH|AI|U|C)$/i.test(token))versions.push(token.toUpperCase());
+            if(/^(?:UNCENSORED|UNCEN|UNC|UC|CH|AI|U|C)$/i.test(token))versions.push(token.toUpperCase());
             return '';
         });
         rest=rest.replace(/\bJP\s*(?:無碼|无码)破解|破解(?:无码|無碼)/gi,'');
@@ -196,7 +208,7 @@
             if(source){rest=rest.slice(source[0].length);continue;}
             const separators=rest.match(/^[\s._()\-]+/)?.[0]||'';
             rest=rest.slice(separators.length);if(!rest)break;
-            const version=rest.match(/^(UNCENSORED|UNCEN|UC|CH|AI|U|C)(?=$|[-_.\s^]|[\u3400-\u9fff])/i);
+            const version=rest.match(/^(UNCENSORED|UNCEN|UNC|UC|CH|AI|U|C)(?=$|[-_.\s^]|[\u3400-\u9fff])/i);
             if(version){versions.push(version[1].toUpperCase());rest=rest.slice(version[0].length);continue;}
             const namedPart=rest.match(/^(CD|PART|PRAT|PT)\s*(\d+)(?=$|[-_.\s^])/i);
             if(namedPart){
@@ -226,7 +238,7 @@
         const info=extractInfo(item.name,officialTitle);
         if(info.skip)return {...info,video,hit};
         const structure=readVideoStructure(tail);
-        const suffix=tail.match(/^[-_.\s]*(UNCENSORED|UNCEN|UC|CH|U|C)(?=$|[^a-z])/i);
+        const suffix=tail.match(/^[-_.\s]*(UNCENSORED|UNCEN|UNC|UC|CH|U|C)(?=$|[^a-z])/i);
         info.tags=uniq([...info.tags.filter(t=>t!=='AI'),...structure.versions.filter(v=>v!=='AI').map(normalizeTag),...desc(info.body||''),...structure.quality,suffix?normalizeTag(suffix[1]):'']).filter(t=>!discardedLabel(t));
         let residual=structure.residual;
         for(const note of info.notes)residual=residual.split(note).join('');
@@ -348,7 +360,7 @@
             if(bytes(stem)<=240&&!/[ぁ-ゖァ-ヺ]/.test(stem))continue;
             // Long-title tail numbering is ambiguous; do not remove a possible episode number.
             if(!info.part&&/[-_](?:[AB]|\d{1,3})$/i.test(stem.trim()))continue;
-            if(/[-_](?:UC|CH|U|C|UNCENSORED|UNCEN|[2468]K|HD|FHD|UHD|AI)$/i.test(stem.trim()))continue;
+            if(/[-_](?:UC|CH|U|C|UNCENSORED|UNCEN|UNC|[2468]K|HD|FHD|UHD|AI)$/i.test(stem.trim()))continue;
             const part=info.part?'-'+info.part:'';
             const version=(counts.get(info.part||'')||0)>1&&info.versions.length?'-'+info.versions.join('-'):'';
             const newName=parentHit.code+part+version+info.video.ext.toLowerCase();
@@ -385,7 +397,7 @@
                 depth--;if(depth!==0)continue;
                 const full=name.slice(start,i+1),content=name.slice(start+1,i);
                 out+=name.slice(cursor,start);
-                const label=/^(?:U|UC|C|CH|UNCENSORED|UNCEN)$/i.test(content)?normalizeTag(content):content;
+                const label=/^(?:U|UC|C|CH|UNCENSORED|UNCEN|UNC)$/i.test(content)?normalizeTag(content):content;
                 if(label==='无码'||label==='中文字幕') {
                     if(!seen.has(label)){out+='【'+label+'】';seen.add(label);}
                 }else out+=full;

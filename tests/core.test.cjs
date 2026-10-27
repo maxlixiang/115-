@@ -25,6 +25,56 @@ test('free text keyword before a timestamp is preserved',()=>{
  assert.deepEqual(p.folder.notes,['舔脚1小时07']);
 });
 
+test('UNC aliases become the uncensored description, case insensitive',()=>{
+ for(const token of ['UNC','unc','UnC']){
+  assert.equal(c.normalizeTag(token),'无码');
+  const p=c.planFolder(directory('ABC-123【'+token+'】'),[file('ABC-123.mp4')],metadata);
+  assert.equal(p.folder.skip,'');
+  assert(p.folder.newName.includes('【无码】'));
+  assert.deepEqual(p.folder.notes,[]);
+ }
+});
+
+test('UNC in explicit or comma notes is promoted without losing personal notes',()=>{
+ for(const name of ['ABC-123【备注：UNC，足交，30分】','ABC-123【备注：UNC 30分】','ABC-123，unc，30分','ABC-123【备注：UNC】']){
+  const p=c.planFolder(directory(name),[file('ABC-123.mp4')],metadata);
+  assert.equal(p.folder.skip,'');
+  assert(p.folder.newName.includes('【无码】'));
+  assert(!p.folder.notes.some(n=>/\bUNC\b/i.test(n)));
+  if(name.includes('30分'))assert(p.folder.notes.some(n=>n.includes('30分')));
+  if(name.includes('足交'))assert(p.folder.notes.some(n=>n.includes('足交')));
+ }
+});
+
+test('video UNC suffix becomes a folder label and single video keeps standard name',()=>{
+ for(const name of ['ABC-123-UNC.mp4','ABC-123_unc.MKV','ABC-123[UNC].avi','ABC-123UNC.mp4','ABC-123-UNC-2.mp4']){
+  const p=c.planFolder(directory('ABC-123'),[file(name)],metadata);
+  assert.equal(p.folder.skip,'');
+  assert(p.folder.tags.includes('无码'));
+  assert.deepEqual(p.folder.notes,[]);
+  assert.equal(p.videos[0].skip,'');
+  assert.equal(p.videos[0].newName,name.includes('-2.')?'ABC-123-2.mp4':'ABC-123.'+name.split('.').at(-1).toLowerCase());
+ }
+});
+
+test('folder UNC, video UNC and existing uncensored labels do not duplicate',()=>{
+ const p=c.planFolder(directory('ABC-123【UNC】【无码】【备注：unc，30分】'),[file('ABC-123-UNC.mp4')],metadata);
+ assert.equal((p.folder.newName.match(/【无码】/g)||[]).length,1);
+ assert.deepEqual(p.folder.notes,['30分']);
+ assert.equal(c.rewriteFolderLabels('ABC-123【UNC】【无码】'),'ABC-123【无码】');
+});
+
+test('UNC is not extracted from ordinary words or the official title',()=>{
+ for(const note of ['UNCLE','JUNCTION','UNCERTAIN','PUNC']){
+  const p=c.planFolder(directory('ABC-123【备注：'+note+'，30分】'),[file('ABC-123.mp4')],metadata);
+  assert(!p.folder.tags.includes('无码'));
+  assert(p.folder.notes.some(n=>n.includes(note)));
+ }
+ const p=c.planFolder(directory('ABC-123'),[file('ABC-123.mp4')],{...metadata,title:'LOVE UNC テスト作品'});
+ assert(!p.folder.tags.includes('无码'));
+ assert(p.folder.newName.endsWith('LOVE UNC テスト作品'));
+});
+
 test('episode identifiers remain on videos',()=>{
  const p=c.planFolder(directory('ABC-123'),[file('source@ABC-123-A.mp4'),file('source@ABC-123-B.mp4','3')],metadata);
  assert.deepEqual(p.videos.map(x=>x.newName),['ABC-123-A.mp4','ABC-123-B.mp4']);
